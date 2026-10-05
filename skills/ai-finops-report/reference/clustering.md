@@ -10,7 +10,7 @@ Cost of `AI_EMBED` scales with the number of *distinct* prompts embedded, and th
 2. **Cap before embedding** — keep only the top `{TOP_N}` distinct prompts by `request_count` then `credits`. Embedding runs `{TOP_N}` times at most; the self-join is at most `{TOP_N}^2/2` comparisons.
 3. **Embed once** — `AI_EMBED` is computed in a CTE and reused on both sides of the join (never recomputed per comparison).
 
-Defaults: `{TOP_N}` = 150, `{THRESHOLD}` = 0.82, model `snowflake-arctic-embed-m-v1.5`. Lower `{TOP_N}` if the account has very high prompt volume. This stays read-only (no Cortex Search service, no objects created).
+Defaults: `{TOP_N}` = 150, `{THRESHOLD}` = 0.75, model `snowflake-arctic-embed-l-v2.0`. Lower `{TOP_N}` if the account has very high prompt volume. This stays read-only (no Cortex Search service, no objects created).
 
 ## Query
 
@@ -68,7 +68,7 @@ top_prompts AS (    -- cap before embedding
 ),
 emb AS (            -- embed once per distinct prompt
     SELECT norm_prompt, sample_prompt, agent_name, request_count, total_credits, sql_turns, verified_sql_turns,
-           AI_EMBED('snowflake-arctic-embed-m-v1.5', sample_prompt) AS vec
+           AI_EMBED('snowflake-arctic-embed-l-v2.0', sample_prompt) AS vec
     FROM top_prompts
 ),
 assign AS (         -- assign each prompt to its most-frequent similar neighbor (greedy canonical)
