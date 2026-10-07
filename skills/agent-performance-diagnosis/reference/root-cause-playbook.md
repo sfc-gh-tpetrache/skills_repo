@@ -27,6 +27,8 @@ R. Router / sub-agent attribution        — resolve this FIRST if the agent rou
 
 **Fix:** the real work is in the nested layer, not the router. Diagnose the slowest sub-agent first; for deep-research/swarm paths, scope or guard when they fire and set expectations that exploratory "why" prompts run a multi-agent path. Router-side levers (trim its instructions, `auto` model) barely move p95 when <5% of the turn is parent compute. Parallelize only if a turn fans out to multiple independent tools (§2.4).
 
+> **Quantify it:** use **§6c-A** for `pct_delegated` (how much of total latency is inherited from sub-agents vs. the router's own compute), **§6c-B** for the fan-out distribution (how often one question hits several sub-agents), **§6c-C** for tool-calls-per-question, and **§6b** (now with per-span `p95_s`) to rank *which* sub-agent is slowest. A high `pct_delegated` + a slow `route -> X` row = pivot the diagnosis into sub-agent X.
+
 ---
 
 ## T. Tool-time attribution (document generation, code execution, MCP) — resolve BEFORE §1.6

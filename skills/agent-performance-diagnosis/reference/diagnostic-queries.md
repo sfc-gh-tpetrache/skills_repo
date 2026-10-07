@@ -423,7 +423,9 @@ ORDER BY category;
 
 ### §6b Per-span detail
 
-Same metrics at the individual span-name grain — use it to see *which* sub-agent (routing), *which* MCP server, or *which* skill dominates. The router label is normalized so FQN and short forms don't collapse to "AGENT".
+Same metrics at the individual span-name grain — use it to see *which* sub-agent (routing), *which* MCP server, or *which* skill dominates, now with **per-span `avg_s` and `p95_s`** so you can rank by latency as well as volume. The router label is normalized so FQN and short forms don't collapse to "AGENT". The coalesced `dur_ms` is computed once in a CTE so `AVG` / `PERCENTILE_CONT` read a single clean number per span.
+
+> **To rank sub-agents specifically** (the "rank sub-agents by P95 and volume" question), filter the result to the `route -> ` rows: those carry each routed sub-agent's call count, turns-used-in, and p95 of its delegated duration together. `total_s` here is delegated wall-clock (it includes the sub-agent's full nested run).
 
 ```sql
 WITH _obs AS (
@@ -432,39 +434,151 @@ WITH _obs AS (
     AND RECORD_ATTRIBUTES:"snow.ai.observability.schema.name"::STRING   = :schema
     AND RECORD_ATTRIBUTES:"snow.ai.observability.object.name"::STRING   = :agent
     AND TIMESTAMP >= DATEADD('day', -:window_days, CURRENT_TIMESTAMP())
+),
+tool_spans AS (
+  SELECT
+    -- normalize AgentRouterTool_FROSTBYTE_AI_PROD.AGENTS.HR_AGENT and AgentRouterTool_HR_AGENT alike
+    CASE
+      WHEN STARTSWITH(RECORD:"name"::STRING,'AgentRouterTool_')
+        THEN 'route -> '||SPLIT_PART(REGEXP_REPLACE(RECORD:"name"::STRING,'^AgentRouterTool_',''),'.',-1)
+      ELSE RECORD:"name"::STRING
+    END AS tool,
+    RECORD_ATTRIBUTES:"ai.observability.record_id"::STRING AS request_id,
+    COALESCE(
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.agent_router.duration"::FLOAT,
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.sql_execution.duration"::FLOAT,
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.semantic_context.duration"::FLOAT,
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.cortex_search.duration"::FLOAT,
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.chart_generation.duration"::FLOAT,
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.code_execution.duration"::FLOAT,
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.server_skill.duration"::FLOAT,
+      RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.server_mcp.duration"::FLOAT,
+      0) AS dur_ms
+  FROM _obs
+  WHERE STARTSWITH(RECORD:"name"::STRING,'AgentRouterTool_')
+     OR STARTSWITH(RECORD:"name"::STRING,'TaskTool_SWARM_')
+     OR STARTSWITH(RECORD:"name"::STRING,'SqlExecution_')
+     OR STARTSWITH(RECORD:"name"::STRING,'SystemExecuteSQLTool_')
+     OR STARTSWITH(RECORD:"name"::STRING,'SemanticContextTool_')
+     OR STARTSWITH(RECORD:"name"::STRING,'CortexSearchService_')
+     OR STARTSWITH(RECORD:"name"::STRING,'CortexSearchSingleToolImpl')
+     OR STARTSWITH(RECORD:"name"::STRING,'CortexChartToolImpl')
+     OR STARTSWITH(RECORD:"name"::STRING,'CodeExecutionTool_')
+     OR STARTSWITH(RECORD:"name"::STRING,'ServerMCPTool_')
+     OR STARTSWITH(RECORD:"name"::STRING,'ServerSkillTool_')
+     OR RECORD:"name"::STRING = 'ToolCall-FileRead'
 )
 SELECT
-  -- normalize AgentRouterTool_FROSTBYTE_AI_PROD.AGENTS.HR_AGENT and AgentRouterTool_HR_AGENT alike
-  CASE
-    WHEN STARTSWITH(RECORD:"name"::STRING,'AgentRouterTool_')
-      THEN 'route -> '||SPLIT_PART(REGEXP_REPLACE(RECORD:"name"::STRING,'^AgentRouterTool_',''),'.',-1)
-    ELSE RECORD:"name"::STRING
-  END AS tool,
-  COUNT(*) AS calls,
-  COUNT(DISTINCT RECORD_ATTRIBUTES:"ai.observability.record_id"::STRING) AS turns_used_in,
-  ROUND(SUM(COALESCE(
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.agent_router.duration"::FLOAT,
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.sql_execution.duration"::FLOAT,
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.semantic_context.duration"::FLOAT,
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.cortex_search.duration"::FLOAT,
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.chart_generation.duration"::FLOAT,
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.code_execution.duration"::FLOAT,
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.server_skill.duration"::FLOAT,
-    RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.server_mcp.duration"::FLOAT,
-    0))/1000,1) AS total_s
-FROM _obs
-WHERE STARTSWITH(RECORD:"name"::STRING,'AgentRouterTool_')
-   OR STARTSWITH(RECORD:"name"::STRING,'TaskTool_SWARM_')
-   OR STARTSWITH(RECORD:"name"::STRING,'SqlExecution_')
-   OR STARTSWITH(RECORD:"name"::STRING,'SystemExecuteSQLTool_')
-   OR STARTSWITH(RECORD:"name"::STRING,'SemanticContextTool_')
-   OR STARTSWITH(RECORD:"name"::STRING,'CortexSearchService_')
-   OR STARTSWITH(RECORD:"name"::STRING,'CortexSearchSingleToolImpl')
-   OR STARTSWITH(RECORD:"name"::STRING,'CortexChartToolImpl')
-   OR STARTSWITH(RECORD:"name"::STRING,'CodeExecutionTool_')
-   OR STARTSWITH(RECORD:"name"::STRING,'ServerMCPTool_')
-   OR STARTSWITH(RECORD:"name"::STRING,'ServerSkillTool_')
-   OR RECORD:"name"::STRING = 'ToolCall-FileRead'
+  tool,
+  COUNT(*)                                        AS calls,
+  COUNT(DISTINCT request_id)                      AS turns_used_in,
+  ROUND(AVG(dur_ms)/1000,2)                        AS avg_s,
+  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY dur_ms)/1000,1) AS p95_s,
+  ROUND(SUM(dur_ms)/1000,1)                        AS total_s
+FROM tool_spans
 GROUP BY 1
-ORDER BY calls DESC;
+ORDER BY total_s DESC;
 ```
+
+---
+
+## §6c Router vs sub-agent split & fan-out — the router-attribution questions
+
+Two aggregate queries that answer "how much latency is the router's own work vs. delegated to sub-agents?" and "how often does one question fan out to several sub-agents?". Both rely on the fact that `AgentRouterTool_<SUBAGENT>`'s `snow.ai.observability.agent.tool.agent_router.duration` **measures the delegated sub-agent run directly** — so no timestamp-window correlation is needed. Key per-turn work on `record_id`.
+
+### §6c-A Router/orchestration time vs. delegated sub-agent time
+
+Per turn, delegated time = sum of that turn's `AgentRouterTool_*` durations; the router's own time (dispatch + parent reasoning) = `response_time_ms − delegated`.
+
+```sql
+WITH _obs AS (
+  SELECT * FROM SNOWFLAKE.LOCAL.AI_OBSERVABILITY_EVENTS
+  WHERE RECORD_ATTRIBUTES:"snow.ai.observability.database.name"::STRING = :db
+    AND RECORD_ATTRIBUTES:"snow.ai.observability.schema.name"::STRING   = :schema
+    AND RECORD_ATTRIBUTES:"snow.ai.observability.object.name"::STRING   = :agent
+    AND TIMESTAMP >= DATEADD('day', -:window_days, CURRENT_TIMESTAMP())
+),
+delegated AS (   -- sub-agent (delegated) time per turn
+  SELECT RECORD_ATTRIBUTES:"ai.observability.record_id"::STRING AS request_id,
+         SUM(RECORD_ATTRIBUTES:"snow.ai.observability.agent.tool.agent_router.duration"::FLOAT) AS subagent_ms
+  FROM _obs
+  WHERE STARTSWITH(RECORD:"name"::STRING,'AgentRouterTool_')
+  GROUP BY 1
+),
+turns AS (       -- total time per turn
+  SELECT RECORD_ATTRIBUTES:"ai.observability.record_id"::STRING AS request_id,
+         VALUE:"snow.ai.observability.response_time_ms"::FLOAT  AS total_ms
+  FROM _obs
+  WHERE RECORD:"name"::STRING = 'CORTEX_AGENT_REQUEST'
+    AND VALUE:"snow.ai.observability.response_time_ms" IS NOT NULL
+)
+SELECT
+  COUNT(*)                                                              AS turns,
+  COUNT_IF(d.subagent_ms IS NOT NULL)                                   AS routed_turns,
+  ROUND(SUM(t.total_ms)/1000,1)                                         AS total_s,
+  ROUND((SUM(t.total_ms)-SUM(COALESCE(d.subagent_ms,0)))/1000,1)        AS router_own_s,
+  ROUND(SUM(COALESCE(d.subagent_ms,0))/1000,1)                          AS subagent_s,
+  ROUND(100*SUM(COALESCE(d.subagent_ms,0))/NULLIF(SUM(t.total_ms),0),1) AS pct_delegated
+FROM turns t
+LEFT JOIN delegated d USING (request_id);
+```
+A high `pct_delegated` is the quantified router verdict: the parent is a thin pass-through and the real latency lives in the sub-agents — pivot the diagnosis into the slowest one (§6b `route -> ` ranking) rather than tuning the router.
+
+### §6c-B Fan-out distribution — distinct sub-agents per question
+
+```sql
+WITH _obs AS (
+  SELECT * FROM SNOWFLAKE.LOCAL.AI_OBSERVABILITY_EVENTS
+  WHERE RECORD_ATTRIBUTES:"snow.ai.observability.database.name"::STRING = :db
+    AND RECORD_ATTRIBUTES:"snow.ai.observability.schema.name"::STRING   = :schema
+    AND RECORD_ATTRIBUTES:"snow.ai.observability.object.name"::STRING   = :agent
+    AND TIMESTAMP >= DATEADD('day', -:window_days, CURRENT_TIMESTAMP())
+),
+fanout AS (
+  SELECT
+    RECORD_ATTRIBUTES:"ai.observability.record_id"::STRING AS request_id,
+    COUNT(DISTINCT SPLIT_PART(REGEXP_REPLACE(RECORD:"name"::STRING,'^AgentRouterTool_',''),'.',-1)) AS distinct_subagents,
+    COUNT(*) AS router_calls   -- > distinct_subagents ⇒ same sub-agent called more than once in the turn
+  FROM _obs
+  WHERE STARTSWITH(RECORD:"name"::STRING,'AgentRouterTool_')
+  GROUP BY 1
+)
+SELECT
+  distinct_subagents,
+  COUNT(*)                                    AS turns,
+  ROUND(100*COUNT(*)/SUM(COUNT(*)) OVER (),1) AS pct_of_routed_turns
+FROM fanout
+GROUP BY 1
+ORDER BY distinct_subagents;
+```
+Fan-out is typically **serial** on these agents, so a turn hitting 3 sub-agents adds their durations (it does not overlap them). Correlate a high-fan-out tail with the §1c daily spike and §6c-A `pct_delegated` to confirm multi-sub-agent turns, not the platform, drive p95.
+
+### §6c-C Tool calls per question — distribution across the window
+
+How many tool calls a single question triggers, aggregated over all turns (§3b computes this for *one* turn; this is the window-level distribution that feeds the §1.4 "too many calls" verdict). Counts every planning tool selection (`tool_selection.name IS NOT NULL`), which includes routing, SQL/Analyst, search, skills, and MCP — i.e. **all** tool calls, not just routing (§6c-B is routing-only).
+
+```sql
+WITH _obs AS (
+  SELECT * FROM SNOWFLAKE.LOCAL.AI_OBSERVABILITY_EVENTS
+  WHERE RECORD_ATTRIBUTES:"snow.ai.observability.database.name"::STRING = :db
+    AND RECORD_ATTRIBUTES:"snow.ai.observability.schema.name"::STRING   = :schema
+    AND RECORD_ATTRIBUTES:"snow.ai.observability.object.name"::STRING   = :agent
+    AND TIMESTAMP >= DATEADD('day', -:window_days, CURRENT_TIMESTAMP())
+),
+per_turn AS (
+  SELECT
+    RECORD_ATTRIBUTES:"ai.observability.record_id"::STRING AS request_id,
+    COUNT_IF(RECORD_ATTRIBUTES:"snow.ai.observability.agent.planning.tool_selection.name" IS NOT NULL) AS tool_calls
+  FROM _obs
+  GROUP BY 1
+)
+SELECT
+  COUNT(*)                                                                    AS turns,
+  ROUND(AVG(tool_calls),1)                                                    AS avg_calls,
+  MEDIAN(tool_calls)                                                          AS p50_calls,
+  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY tool_calls),0)           AS p95_calls,
+  MAX(tool_calls)                                                             AS max_calls,
+  ROUND(100*COUNT_IF(tool_calls >= 3)/NULLIF(COUNT(*),0),1)                   AS pct_turns_3plus_calls
+FROM per_turn;
+```
+A high `avg_calls` / `p95_calls` points at §1.4 (too many serial tool or Analyst calls) — the fix is parallelizing independent tools (§2.4/§4.1) or trimming instructions that over-trigger tool use. For a router, cross-check against §6c-B: if most of the calls are routing, the lever is sub-agent fan-out, not tool parallelization.

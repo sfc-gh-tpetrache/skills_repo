@@ -19,6 +19,8 @@ One-line verdict: the dominant root cause and the headline latency, e.g.
 
 Work the decision order and report what each check found: router/nested-execution (§R — routed sub-agent & skill/swarm span counts), tool-time (§T — document generation, code execution, MCP), platform (§1.3 — daily p95 vs steps, cross-region setting), too-many-calls (§1.4 — step distribution + tool breakdown), slow SQL (§1.5 — time budget, VQR, slowest `query_id`), slow reasoning (§1.6 — per-step duration, step-0 vs step-1+ tokens), multi-turn (§3.7 — first vs follow-up). `metric_card` / small `table` per check; a `bar_chart` of daily p95 and a `pie_chart` of sub-agent routing where relevant.
 
+For a **router** agent, lead §R with the quantified split: a `metric_card` of `router_own_s` vs `subagent_s` and `pct_delegated` (§6c-A), a small `table` ranking sub-agents by `p95_s` + volume (§6b `route -> ` rows), and the fan-out distribution (§6c-B) — plus tool-calls-per-question (§6c-C, avg/p95/max) for the §1.4 read. A high `pct_delegated` is the headline: the router is a pass-through and the latency is in the sub-agents.
+
 ## 3b. Tool-usage mix (§6, §T)
 
 Run the §6 tool-usage taxonomy and report **what the agent actually does**. A `table` (or `pie_chart`) of the category rollup — routing / SQL & semantic / retrieval / **code execution & file manipulation** / **document & chart generation** / **MCP** / other server skills — with `calls`, `turns_used_in`, `total_s`, and `pct_of_tool_time`. Then call out, in one line each:
@@ -36,7 +38,7 @@ For the 1–2 slowest turns, show the **span timeline ordered by `TIMESTAMP`** a
 
 Bulleted findings aggregated across the window, e.g.:
 - Dominant cause and the evidence for it (routed sub-agent / skill-swarm wrap, slow table, VQR misses, step-0 token bloat, follow-ups slower than first turns).
-- For routers: how many turns delegate, and to which sub-agents.
+- For routers: how many turns delegate, `pct_delegated` (§6c-A), the fan-out profile (§6c-B — how often one question hits several sub-agents), and which sub-agents are slowest by p95 (§6b).
 - First-vs-follow-up gap (§3.7) if present.
 
 ## 6. Prioritized recommendations
